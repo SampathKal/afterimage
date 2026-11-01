@@ -19,7 +19,7 @@ import {
   CircleHelp
 } from "lucide-react";
 
-const API = "";
+const API = "https://afterimage-ldwv.onrender.com";
 
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) {
