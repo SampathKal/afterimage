@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Frontend build
+client/dist/
+
+# Backend generated files
+server/uploads/*
+server/output/*
+server/temp/*
+
+# Keep placeholder files
+!server/uploads/.gitkeep
+!server/output/.gitkeep
+!server/temp/.gitkeep
+
+# System files
+.DS_Store
