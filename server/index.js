@@ -9,6 +9,7 @@ const net = require("net");
 const { spawn } = require("child_process");
 const { v4: uuidv4 } = require("uuid");
 const OpenAI = require("openai");
+const sharp = require("sharp");
 
 const app = express();
 const cors = require("cors");
@@ -45,7 +46,6 @@ const openai = process.env.OPENAI_API_KEY
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const TRANSCRIPTION_MODEL = process.env.TRANSCRIPTION_MODEL || "whisper-1";
 
-// Cost and processing safeguards.
 const MAX_UPLOAD_MB = Number(process.env.MAX_UPLOAD_MB || 500);
 const MAX_DURATION = Number(process.env.MAX_VIDEO_DURATION_SECONDS || 7200);
 const MAX_TRANSCRIPTION_MINUTES = Number(
@@ -53,6 +53,8 @@ const MAX_TRANSCRIPTION_MINUTES = Number(
 );
 const AUDIO_CHUNK_SECONDS = 480;
 const MAX_HIGHLIGHTS = 20;
+const VISUAL_SAMPLE_INTERVAL = Number(process.env.VISUAL_SAMPLE_INTERVAL_SECONDS || 2.5);
+const VISUAL_CHANGE_THRESHOLD = Number(process.env.VISUAL_CHANGE_THRESHOLD || 0.045);
 
 app.use(express.json({ limit: "2mb" }));
 app.use("/output", express.static(OUTPUT_DIR));
@@ -349,8 +351,6 @@ async function downloadVideo(url, destination) {
   return destination;
 }
 
-// Extract audio in small MP3 chunks so long videos do not exceed
-// the transcription upload limit.
 async function extractAudioChunks(videoPath, duration, directory) {
   fs.mkdirSync(directory, { recursive: true });
 
@@ -438,8 +438,149 @@ function extractJson(text) {
   return JSON.parse(match[0]);
 }
 
-// Analyze manageable transcript sections separately.
-// Each result is mapped back to the original video timeline.
+async function createFrameSamples(videoPath, start, end, directory) {
+  fs.mkdirSync(directory, { recursive: true });
+  const sampleWindow = Math.max(0.25, Number(VISUAL_SAMPLE_INTERVAL));
+  const duration = Math.max(0.5, end - start);
+  const outputPattern = path.join(directory, "frame-%03d.png");
+
+  await runCommand(ffmpeg, [
+    "-y",
+    "-hide_banner",
+    "-loglevel", "error",
+    "-ss", String(start),
+    "-i", videoPath,
+    "-t", String(duration),
+    "-vf", "fps=1/" + sampleWindow + ",scale=320:180:force_original_aspect_ratio=decrease,pad=320:180:(ow-iw)/2:(oh-ih)/2,setsar=1",
+    "-q:v", "2",
+    outputPattern
+  ]);
+
+  const files = fs.readdirSync(directory)
+    .filter(name => /^frame-\d+\.png$/i.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+  return files.map((name, index) => ({
+    filePath: path.join(directory, name),
+    timestamp: start + index * sampleWindow
+  }));
+}
+
+async function computeFrameDifference(frameA, frameB) {
+  const [a, b] = await Promise.all([
+    sharp(frameA).resize(96, 54, { fit: "inside" }).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+    sharp(frameB).resize(96, 54, { fit: "inside" }).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+  ]);
+
+  const dataA = a.data;
+  const dataB = b.data;
+  const pixelCount = dataA.length;
+  let totalDelta = 0;
+  let maxDelta = 0;
+
+  for (let i = 0; i < pixelCount; i += 4) {
+    const diff = Math.abs(dataA[i] - dataB[i]) +
+      Math.abs(dataA[i + 1] - dataB[i + 1]) +
+      Math.abs(dataA[i + 2] - dataB[i + 2]);
+
+    totalDelta += diff;
+    maxDelta = Math.max(maxDelta, diff);
+  }
+
+  const normalized = pixelCount ? totalDelta / (pixelCount * 3 * 255) : 0;
+  return {
+    normalized,
+    maxDelta,
+    absoluteDelta: totalDelta
+  };
+}
+
+function mergeNearbyEvents(candidates) {
+  const merged = [];
+
+  for (const candidate of candidates.sort((a, b) => a.start - b.start)) {
+    const last = merged[merged.length - 1];
+
+    if (last && candidate.start <= last.end + 3) {
+      const stronger = candidate.importanceScore >= last.importanceScore ? candidate : last;
+      last.start = Math.min(last.start, candidate.start);
+      last.end = Math.max(last.end, candidate.end);
+      last.time = safeTimestamp(last.start);
+      last.endTime = safeTimestamp(last.end);
+      last.importanceScore = Math.max(last.importanceScore, candidate.importanceScore);
+      last.confidence = Math.max(last.confidence, candidate.confidence);
+      last.description = stronger.description;
+      last.reason = stronger.reason;
+      last.uncertainty = stronger.uncertainty;
+      last.observed = stronger.observed;
+      last.cannotDetermine = stronger.cannotDetermine;
+      last.visualDelta = Math.max(last.visualDelta ?? 0, candidate.visualDelta ?? 0);
+    } else {
+      merged.push(candidate);
+    }
+  }
+
+  return merged;
+}
+
+async function detectFreeVisualEvents(videoPath, start, end, question, job) {
+  const directory = path.join(TEMP_DIR, job.id, "visual");
+  fs.rmSync(directory, { recursive: true, force: true });
+
+  const frames = await createFrameSamples(videoPath, start, end, directory);
+
+  if (frames.length < 2) {
+    return [];
+  }
+
+  const candidates = [];
+
+  for (let i = 1; i < frames.length; i++) {
+    const previous = frames[i - 1];
+    const current = frames[i];
+    const diff = await computeFrameDifference(previous.filePath, current.filePath);
+
+    if (diff.normalized < VISUAL_CHANGE_THRESHOLD) continue;
+
+    const windowStart = Math.max(start, previous.timestamp);
+    const windowEnd = Math.min(end, current.timestamp + VISUAL_SAMPLE_INTERVAL);
+    const severity = diff.normalized > 0.16 ? "strong visible change" : diff.normalized > 0.08 ? "noticeable visual change" : "subtle motion";
+    const title = diff.normalized > 0.16 ? "Scene or motion shift" : "Visible movement";
+    const description = `Visible ${severity} detected in the sampled frames around ${safeTimestamp(windowStart)} to ${safeTimestamp(windowEnd)}.`;
+    const reason = `Frame-to-frame comparison detected a change score of ${(diff.normalized * 100).toFixed(1)}%. This can indicate motion, scene transitions, object entry/exit, or camera movement.`;
+    const uncertainty = "The system observed a visual difference, but it cannot determine the exact cause, the identity of objects, or the semantic meaning without additional context.";
+    const observed = `Frames sampled at ${safeTimestamp(windowStart)} and ${safeTimestamp(windowEnd)} show a visible change.`;
+    const cannotDetermine = "The system cannot tell who or what caused the motion, whether it was intentional, or what the broader context means.";
+    const importanceScore = Math.min(100, Math.max(25, Math.round(diff.normalized * 180 + 35)));
+    const confidence = Math.max(0.4, Math.min(0.96, diff.normalized * 4.2));
+
+    candidates.push({
+      timestamp: windowStart,
+      start: windowStart,
+      end: windowEnd,
+      time: safeTimestamp(windowStart),
+      endTime: safeTimestamp(windowEnd),
+      title,
+      description,
+      hook: "A visible change appears here in the footage.",
+      reason,
+      importanceScore,
+      confidence,
+      uncertainty,
+      observed,
+      cannotDetermine,
+      mode: "free-visual",
+      visualDelta: diff.normalized,
+      rangeStart: start,
+      rangeEnd: end
+    });
+  }
+
+  return mergeNearbyEvents(candidates)
+    .filter(event => event.end > event.start + 1)
+    .sort((a, b) => a.start - b.start);
+}
+
 async function findHighlights(transcript, question, job) {
   if (!transcript.length) return [];
 
@@ -476,8 +617,7 @@ async function findHighlights(transcript, question, job) {
           text: `
 You are the highlight editor for Afterimage.
 
-Analyze this transcript from a longer video and find moments that could work
-as independent short-form video clips.
+Analyze this transcript from a longer video and find moments that could work as independent short-form video clips.
 
 User's requested focus:
 ${question || "Find the most interesting, useful, entertaining, or memorable moments."}
@@ -549,12 +689,14 @@ importanceScore must be 0-100. confidence must be 0-1.
         reason: String(item.reason || ""),
         importanceScore: Math.max(0, Math.min(100, Number(item.importanceScore) || 0)),
         confidence: Math.max(0, Math.min(1, Number(item.confidence) || 0)),
-        mode: "transcript-ai"
+        mode: "transcript-ai",
+        uncertainty: "The transcript suggests this moment is meaningful, but the transcript may omit visual context or unspoken events.",
+        observed: "This moment was selected from spoken content in the transcript.",
+        cannotDetermine: "The transcript cannot confirm visual details or intent that were not spoken."
       });
     }
   }
 
-  // Remove near-duplicate overlapping candidates.
   candidates.sort((a, b) => b.importanceScore - a.importanceScore);
 
   const selected = [];
@@ -643,30 +785,43 @@ async function processVideo(job, video, videoIndex, totalVideos) {
     throw new Error(`Invalid time range. Video duration: ${safeTimestamp(duration)}`);
   }
 
-  job.stage = `Transcribing video ${videoIndex + 1} of ${totalVideos}`;
-  const transcript = await transcribeVideo(video.path, end - start, job);
+  const mode = String(job.settings.mode || "free").toLowerCase();
+  let events = [];
+  let transcript = [];
 
-  // If the user selected a starting offset, adjust transcript timestamps.
-  const adjustedTranscript = transcript.map(s => ({
-    ...s,
-    start: s.start + start,
-    end: s.end + start
-  }));
+  if (mode === "openai" && openai) {
+    job.stage = `Transcribing video ${videoIndex + 1} of ${totalVideos}`;
+    job.progress = 20;
 
-  job.stage = "Understanding the video's context";
-  job.progress = 38;
+    try {
+      transcript = await transcribeVideo(video.path, end - start, job);
+      const adjustedTranscript = transcript.map(s => ({
+        ...s,
+        start: s.start + start,
+        end: s.end + start
+      }));
 
-  const events = await findHighlights(
-    adjustedTranscript,
-    job.settings.question,
-    job
-  );
+      job.stage = "Understanding the video's context";
+      job.progress = 38;
+
+      events = await findHighlights(adjustedTranscript, job.settings.question, job);
+    } catch (error) {
+      console.warn("OpenAI analysis failed. Falling back to free visual detection.", error.message);
+      events = await detectFreeVisualEvents(video.path, start, end, job.settings.question, job);
+    }
+  } else {
+    job.stage = `Sampling frames for visual-change detection (${videoIndex + 1}/${totalVideos})`;
+    job.progress = 20;
+    events = await detectFreeVisualEvents(video.path, start, end, job.settings.question, job);
+    job.progress = 80;
+  }
 
   const finalEvents = events.map(event => ({
     ...event,
     videoName: video.name,
     rangeStart: start,
-    rangeEnd: end
+    rangeEnd: end,
+    sourceVideoUrl: `/api/jobs/${job.id}/video/${videoIndex}`
   }));
 
   return {
@@ -674,8 +829,8 @@ async function processVideo(job, video, videoIndex, totalVideos) {
     duration,
     start,
     end,
-    transcript: adjustedTranscript,
-    transcriptText: transcriptToText(adjustedTranscript),
+    transcript,
+    transcriptText: transcriptToText(transcript),
     events: finalEvents
   };
 }
@@ -718,8 +873,24 @@ app.get("/api/health", (req, res) => {
     maxUploadMB: MAX_UPLOAD_MB,
     maxTranscriptionMinutes: MAX_TRANSCRIPTION_MINUTES,
     model: MODEL,
-    transcriptionModel: TRANSCRIPTION_MODEL
+    transcriptionModel: TRANSCRIPTION_MODEL,
+    freeVisualAnalysisAvailable: true
   });
+});
+
+app.get("/api/jobs/:id/video/:videoIndex", (req, res) => {
+  const job = jobs.get(req.params.id);
+
+  if (!job) return res.status(404).json({ error: "Job not found." });
+
+  const index = Number(req.params.videoIndex);
+  const video = job.videos?.[index];
+
+  if (!video || !fs.existsSync(video.path)) {
+    return res.status(404).json({ error: "Video not found." });
+  }
+
+  res.sendFile(video.path);
 });
 
 app.post("/api/analyze", upload.array("videos", 5), async (req, res) => {
@@ -729,7 +900,9 @@ app.post("/api/analyze", upload.array("videos", 5), async (req, res) => {
   }));
 
   try {
-    if (!openai) {
+    const selectedMode = String(req.body.mode || "free").toLowerCase();
+
+    if (selectedMode === "openai" && !openai) {
       throw new Error("OpenAI is not configured. Add OPENAI_API_KEY to your .env file.");
     }
 
@@ -768,7 +941,7 @@ app.post("/api/analyze", upload.array("videos", 5), async (req, res) => {
       createdAt: new Date().toISOString(),
       videos,
       settings: {
-        mode: "transcript-ai",
+        mode: selectedMode,
         question: String(req.body.question || ""),
         startTime: String(req.body.startTime || "00:00:00"),
         endTime: String(req.body.endTime || "")
@@ -821,7 +994,6 @@ app.get("/api/jobs/:id/results", (req, res) => {
     });
   }
 
-  // Keep transcript available to the UI and clip caption generator.
   res.json({ results: job.results });
 });
 
