@@ -89,7 +89,8 @@ function App() {
           setHealth(data);
         }
       })
-      .catch(() => {
+      .catch((error) => {
+        console.error("Afterimage health check failed:", error);
         if (alive) {
           setHealth(null);
         }
