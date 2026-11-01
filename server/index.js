@@ -15,6 +15,7 @@ const cors = require("cors");
 app.use(cors({
   origin: [
     "http://localhost:5173",
+    "https://afterimage-dun.vercel.app",
     "https://afterimage-h371ji0ib-kalagarlasampath-5113s-projects.vercel.app",
     "https://afterimage.vercel.app"
   ]
