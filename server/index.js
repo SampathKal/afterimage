@@ -11,6 +11,13 @@ const { v4: uuidv4 } = require("uuid");
 const OpenAI = require("openai");
 
 const app = express();
+const cors = require("cors");
+app.use(cors({
+  origin: [
+    "https://afterimage-h371ji0ib-kalagarlasampath-5113s-projects.vercel.app",
+    "https://afterimage.vercel.app"
+  ]
+}));
 const PORT = process.env.PORT || 8787;
 
 const ROOT = __dirname;
