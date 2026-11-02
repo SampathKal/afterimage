@@ -19,7 +19,7 @@ import {
   CircleHelp
 } from "lucide-react";
 
-const API = "https://afterimage-ldwv.onrender.com";
+const API = import.meta.env.VITE_API_URL || "http://localhost:8787";
 
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) {
@@ -467,24 +467,24 @@ function App() {
   );
 
   // Filter and sort events
-const visibleEvents = allEvents
-  .filter(event => {
-    const score = Number(event.importanceScore) || 0;
+  const visibleEvents = allEvents
+    .filter(event => {
+      const score = Number(event.importanceScore) || 0;
 
-    if (filter === "high") return score >= 70;
-    if (filter === "medium") return score >= 40 && score < 70;
-    if (filter === "low") return score < 40;
+      if (filter === "high") return score >= 70;
+      if (filter === "medium") return score >= 40 && score < 70;
+      if (filter === "low") return score < 40;
 
-    return true;
-  })
-  .sort((a, b) => {
-    const scoreA = Number(a.importanceScore) || 0;
-    const scoreB = Number(b.importanceScore) || 0;
+      return true;
+    })
+    .sort((a, b) => {
+      const scoreA = Number(a.importanceScore) || 0;
+      const scoreB = Number(b.importanceScore) || 0;
 
-    return sortOrder === "high"
-      ? scoreB - scoreA
-      : scoreA - scoreB;
-  });
+      return sortOrder === "high"
+        ? scoreB - scoreA
+        : scoreA - scoreB;
+    });
 
   const progressValue =
     status === "uploading"
@@ -1108,33 +1108,33 @@ const visibleEvents = allEvents
                 <h3>Event timeline</h3>
 
                 <div className="filter-row">
-  {["all", "high", "medium", "low"].map(value => (
-    <button
-      key={value}
-      className={filter === value ? "filter-active" : ""}
-      onClick={() => setFilter(value)}
-      type="button"
-    >
-      {value === "all"
-        ? "All"
-        : value[0].toUpperCase() + value.slice(1)}
-    </button>
-  ))}
+                  {["all", "high", "medium", "low"].map(value => (
+                    <button
+                      key={value}
+                      className={filter === value ? "filter-active" : ""}
+                      onClick={() => setFilter(value)}
+                      type="button"
+                    >
+                      {value === "all"
+                        ? "All"
+                        : value[0].toUpperCase() + value.slice(1)}
+                    </button>
+                  ))}
 
-  <button
-    className="sort-button"
-    onClick={() =>
-      setSortOrder(current =>
-        current === "high" ? "low" : "high"
-      )
-    }
-    type="button"
-  >
-    {sortOrder === "high"
-      ? "↓ Highest importance"
-      : "↑ Lowest importance"}
-  </button>
-</div>
+                  <button
+                    className="sort-button"
+                    onClick={() =>
+                      setSortOrder(current =>
+                        current === "high" ? "low" : "high"
+                      )
+                    }
+                    type="button"
+                  >
+                    {sortOrder === "high"
+                      ? "↓ Highest importance"
+                      : "↑ Lowest importance"}
+                  </button>
+                </div>
               </div>
 
               <div className="timeline-list">
@@ -1177,7 +1177,25 @@ const visibleEvents = allEvents
                           <b>Uncertainty:</b> {event.uncertainty}
                         </p>
 
+                        <p className="event-uncertainty">
+                          <b>What is visually observed:</b> {event.observed}
+                        </p>
+
+                        <p className="event-uncertainty">
+                          <b>What cannot be determined:</b> {event.cannotDetermine}
+                        </p>
+
                         <div className="event-actions">
+                          <a
+                            className="small-button"
+                            href={event.sourceVideoUrl ? `${API}${event.sourceVideoUrl}` : "#"}
+                            target="_blank"
+                            rel="noreferrer"
+                            type="button"
+                          >
+                            <FileVideo size={15} /> Original footage
+                          </a>
+
                           <button
                             className="small-button"
                             onClick={() =>
