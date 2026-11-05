@@ -19,6 +19,7 @@ app.use(cors({
     "http://localhost:5173",
     "https://afterimage-dun.vercel.app",
     "https://afterimage-h371ji0ib-kalagarlasampath-5113s-projects.vercel.app",
+    "https://afterimage-ohhzko5fv-kalagarlasampath-5113s-projects.vercel.app",
     "https://afterimage.vercel.app"
   ]
 }));
