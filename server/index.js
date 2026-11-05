@@ -20,6 +20,7 @@ app.use(cors({
     "https://afterimage-dun.vercel.app",
     "https://afterimage-h371ji0ib-kalagarlasampath-5113s-projects.vercel.app",
     "https://afterimage-ohhzko5fv-kalagarlasampath-5113s-projects.vercel.app",
+    "https://afterimage-2p1geel1m-kalagarlasampath-5113s-projects.vercel.app",
     "https://afterimage.vercel.app"
   ]
 }));
