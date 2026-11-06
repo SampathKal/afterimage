@@ -789,21 +789,50 @@ function createSrt(segments, clipStart, clipEnd) {
   }).join("\n\n");
 }
 
+
 async function createClip(videoPath, event, job, videoIndex) {
   const clipId = uuidv4();
   const outputPath = path.join(OUTPUT_DIR, `${clipId}.mp4`);
   const captionPath = path.join(OUTPUT_DIR, `${clipId}.srt`);
 
-  const start = Math.max(event.rangeStart, event.start ?? event.timestamp);
-  const end = Math.min(event.rangeEnd, event.end ?? (event.timestamp + 30));
+  const videoResult = job.results[videoIndex];
 
-  if (end <= start) throw new Error("Invalid clip boundaries.");
+  const duration = Number(videoResult?.duration);
+  const timestamp = Number(
+    event.timestamp ?? event.start ?? event.time
+  );
+
+  if (!Number.isFinite(timestamp) || timestamp < 0) {
+    throw new Error("The event timestamp is invalid.");
+  }
+
+  if (!Number.isFinite(duration) || duration <= 0) {
+    throw new Error("The original video duration is unavailable.");
+  }
+
+  const clipDuration = Math.min(25, duration);
+
+  let start = Math.max(0, timestamp - 12);
+  let end = start + clipDuration;
+
+  if (end > duration) {
+    end = duration;
+    start = Math.max(0, end - clipDuration);
+  }
+
+  if (end <= start) {
+    throw new Error("Invalid clip boundaries.");
+  }
 
   await runCommand(ffmpeg, [
-    "-y", "-hide_banner", "-loglevel", "error",
-    "-ss", String(start),
+    "-y",
+    "-hide_banner",
+    "-loglevel", "error",
     "-i", videoPath,
+    "-ss", String(start),
     "-t", String(end - start),
+    "-map", "0:v:0",
+    "-map", "0:a?",
     "-c:v", "libx264",
     "-preset", "ultrafast",
     "-pix_fmt", "yuv420p",
@@ -812,8 +841,16 @@ async function createClip(videoPath, event, job, videoIndex) {
     outputPath
   ]);
 
-  const videoResult = job.results[videoIndex];
-  const srt = createSrt(videoResult.transcript || [], start, end);
+  if (!fs.existsSync(outputPath) || fs.statSync(outputPath).size === 0) {
+    throw new Error("FFmpeg did not produce a valid video clip.");
+  }
+
+  const srt = createSrt(
+    videoResult.transcript || [],
+    start,
+    end
+  );
+
   fs.writeFileSync(captionPath, srt, "utf8");
 
   return {
@@ -826,6 +863,7 @@ async function createClip(videoPath, event, job, videoIndex) {
     duration: Math.round(end - start)
   };
 }
+
 
 
 async function processVideo(job, video, videoIndex, totalVideos) {
