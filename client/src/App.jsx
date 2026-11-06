@@ -1198,18 +1198,32 @@ const visibleEvents = allEvents
                         </div>
 
                         {clip && (
-                          <div className="clip-result">
-                            <div className="clip-heading">
-                              <Check size={16} /> Clip created
-                            </div>
+  <div className="clip-result">
+    <div className="clip-heading">
+      <Check size={16} /> Clip created
+    </div>
 
-                            <video controls src={clip.url} />
+    <video
+      controls
+      src={
+        clip.url.startsWith("http")
+          ? clip.url
+          : `${API}${clip.url}`
+      }
+    />
 
-                            <a href={clip.downloadUrl} download>
-                              <Download size={15} /> Download MP4
-                            </a>
-                          </div>
-                        )}
+    <a
+      href={
+        clip.downloadUrl.startsWith("http")
+          ? clip.downloadUrl
+          : `${API}${clip.downloadUrl}`
+      }
+      download
+    >
+      <Download size={15} /> Download MP4
+    </a>
+  </div>
+)}
                       </div>
                     </article>
                   );
