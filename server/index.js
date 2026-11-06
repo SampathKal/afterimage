@@ -1135,6 +1135,7 @@ app.get("/api/jobs/:id/results", (req, res) => {
 });
 
 app.post("/api/jobs/:id/clips", async (req, res) => {
+  console.log("CLIP REQUEST RECEIVED", req.params.id, req.body);
   try {
     const job = jobs.get(req.params.id);
 
