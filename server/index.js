@@ -258,7 +258,14 @@ async function downloadYouTubeVideo(url, destination) {
     if (stats.size > MAX_UPLOAD_MB * 1024 * 1024) {
       throw new Error("The downloaded video exceeds the upload size limit.");
     }
-
+    console.log("FFMPEG STARTING:", {
+  videoPath,
+  inputExists: fs.existsSync(videoPath),
+  start,
+  end,
+  duration
+});
+console.log("FFMPEG FINISHED");
     await runCommand(ffmpeg, [
       "-y", "-hide_banner", "-loglevel", "error",
       "-i", downloadedPath,
@@ -1137,7 +1144,7 @@ app.get("/api/jobs/:id/results", (req, res) => {
 app.post("/api/jobs/:id/clips", async (req, res) => {
   console.log("CLIP REQUEST RECEIVED", req.params.id, req.body);
   console.log("JOB FOUND:", jobs.has(req.params.id));
-    console.log("JOB FOUND:", jobs.has(req.params.id));
+
   try {
     const job = jobs.get(req.params.id);
 
@@ -1148,6 +1155,7 @@ app.post("/api/jobs/:id/clips", async (req, res) => {
     const { videoIndex, eventIndex } = req.body;
     const vi = Number(videoIndex);
     const ei = Number(eventIndex);
+
     const videoResult = job.results[vi];
     const event = videoResult?.events?.[ei];
 
@@ -1157,19 +1165,20 @@ app.post("/api/jobs/:id/clips", async (req, res) => {
 
     console.log("STARTING CLIP GENERATION");
 
-    console.log("STARTING CLIP GENERATION");
-
-    const clip = await createClip(job.videos[vi].path, event, job, vi);
+    const clip = await createClip(
+      job.videos[vi].path,
+      event,
+      job,
+      vi
+    );
 
     console.log("CLIP GENERATION FINISHED");
 
-    res.json(clip);
+    return res.json(clip);
 
-    console.log("CLIP GENERATION FINISHED");
-
-res.json(clip);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error("CLIP GENERATION ERROR:", error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
