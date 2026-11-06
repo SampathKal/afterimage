@@ -782,6 +782,21 @@ If there are no meaningful events, return an empty events array.
   return selected.sort((a, b) => a.start - b.start);
 }
 
+function srtTime(seconds) {
+  const totalMilliseconds = Math.max(0, Math.round(seconds * 1000));
+
+  const hours = Math.floor(totalMilliseconds / 3600000);
+  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
+  const secs = Math.floor((totalMilliseconds % 60000) / 1000);
+  const milliseconds = totalMilliseconds % 1000;
+
+  return (
+    String(hours).padStart(2, "0") + ":" +
+    String(minutes).padStart(2, "0") + ":" +
+    String(secs).padStart(2, "0") + "," +
+    String(milliseconds).padStart(3, "0")
+  );
+}
 
 function createSrt(segments, clipStart, clipEnd) {
   const relevant = segments.filter(s =>
