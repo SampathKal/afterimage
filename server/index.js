@@ -1136,6 +1136,8 @@ app.get("/api/jobs/:id/results", (req, res) => {
 
 app.post("/api/jobs/:id/clips", async (req, res) => {
   console.log("CLIP REQUEST RECEIVED", req.params.id, req.body);
+  console.log("JOB FOUND:", jobs.has(req.params.id));
+    console.log("JOB FOUND:", jobs.has(req.params.id));
   try {
     const job = jobs.get(req.params.id);
 
@@ -1153,8 +1155,19 @@ app.post("/api/jobs/:id/clips", async (req, res) => {
       return res.status(400).json({ error: "Highlight not found." });
     }
 
+    console.log("STARTING CLIP GENERATION");
+
+    console.log("STARTING CLIP GENERATION");
+
     const clip = await createClip(job.videos[vi].path, event, job, vi);
+
+    console.log("CLIP GENERATION FINISHED");
+
     res.json(clip);
+
+    console.log("CLIP GENERATION FINISHED");
+
+res.json(clip);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
