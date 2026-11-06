@@ -576,14 +576,205 @@ importanceScore must be 0-100. confidence must be 0-1.
   return selected.sort((a, b) => a.start - b.start);
 }
 
-function srtTime(seconds) {
-  const ms = Math.max(0, Math.floor(seconds * 1000));
-  const h = String(Math.floor(ms / 3600000)).padStart(2, "0");
-  const m = String(Math.floor((ms % 3600000) / 60000)).padStart(2, "0");
-  const s = String(Math.floor((ms % 60000) / 1000)).padStart(2, "0");
-  const milli = String(ms % 1000).padStart(3, "0");
-  return `${h}:${m}:${s},${milli}`;
+
+// Extract frames from a video for visual analysis.
+async function extractVideoFrames(videoPath, start, end, job, videoIndex) {
+  const duration = end - start;
+
+  // Limit the number of frames to control processing time and API cost.
+  const maxFrames = 120;
+  const interval = Math.max(3, Math.ceil(duration / maxFrames));
+
+  const directory = path.join(
+    TEMP_DIR,
+    job.id,
+    `video-${videoIndex}-frames`
+  );
+
+  fs.mkdirSync(directory, { recursive: true });
+
+  job.stage = "Extracting video frames";
+  job.progress = 15;
+
+  await runCommand(ffmpeg, [
+    "-y",
+    "-hide_banner",
+    "-loglevel", "error",
+    "-ss", String(start),
+    "-i", videoPath,
+    "-t", String(duration),
+    "-vf", `fps=1/${interval},scale=640:-2`,
+    "-q:v", "5",
+    path.join(directory, "frame-%04d.jpg")
+  ]);
+
+  const files = fs.readdirSync(directory)
+    .filter(name => name.endsWith(".jpg"))
+    .sort();
+
+  return files.map((name, index) => ({
+    path: path.join(directory, name),
+    timestamp: Math.min(end, start + index * interval),
+    time: safeTimestamp(Math.min(end, start + index * interval))
+  }));
 }
+
+// Ask the vision model to identify events visible in a batch of frames.
+async function analyzeVisualFrames(frames, question, rangeStart, rangeEnd, job) {
+  if (!frames.length) return [];
+
+  const batchSize = 10;
+  const candidates = [];
+
+  for (let i = 0; i < frames.length; i += batchSize) {
+    const batch = frames.slice(i, i + batchSize);
+
+    job.stage = `Visually analyzing frames (${Math.min(i + batch.length, frames.length)}/${frames.length})`;
+    job.progress = 25 + Math.round(
+      ((i + batch.length) / frames.length) * 55
+    );
+
+    const content = [{
+      type: "input_text",
+      text: `
+You are Afterimage, a video analysis system.
+
+Analyze the supplied video frames in chronological order.
+Each image is labeled with its timestamp.
+
+USER'S QUESTION:
+${question || "Identify meaningful activities, unusual behavior, interactions, and important events."}
+
+Your task:
+- Describe what is visibly happening.
+- Identify meaningful changes in activity.
+- Notice interactions between people and objects.
+- Identify potentially important events relevant to the user's question.
+- Connect observations across consecutive frames when the images support doing so.
+- Distinguish direct visual observations from interpretations.
+- Do not invent actions that are not visible.
+- Do not identify people or guess their identities.
+- Do not claim that someone committed a crime based only on ambiguous behavior.
+- If something is uncertain, clearly state that it is uncertain.
+- Ignore ordinary movement unless it is relevant to the question.
+
+Return JSON only, in this format:
+
+{
+  "events": [
+    {
+      "timestamp": 120,
+      "start": 115,
+      "end": 130,
+      "title": "Short descriptive event title",
+      "description": "Describe only what can be observed in the frames.",
+      "evidence": "Explain which visible details support this observation.",
+      "reason": "Why this moment may be important.",
+      "importanceScore": 80,
+      "confidence": 0.85
+    }
+  ]
+}
+
+Timestamps must use seconds from the ORIGINAL video.
+Only return events supported by the supplied images.
+Use a reasonable time range around the observed activity.
+Return no more than 5 events per batch.
+importanceScore must be 0-100.
+confidence must be between 0 and 1.
+If there are no meaningful events, return an empty events array.
+`
+    }];
+
+    for (const frame of batch) {
+      const imageBase64 = fs.readFileSync(frame.path).toString("base64");
+
+      content.push({
+        type: "input_text",
+        text: `Frame timestamp: ${frame.time} (${frame.timestamp} seconds)`
+      });
+
+      content.push({
+        type: "input_image",
+        image_url: `data:image/jpeg;base64,${imageBase64}`,
+        detail: "low"
+      });
+    }
+
+    const response = await openai.responses.create({
+      model: MODEL,
+      input: [{
+        role: "user",
+        content
+      }]
+    });
+
+    const parsed = extractJson(response.output_text);
+
+    for (const item of parsed.events || []) {
+      const timestamp = Number(item.timestamp);
+      const proposedStart = Number(item.start);
+      const proposedEnd = Number(item.end);
+
+      if (!Number.isFinite(timestamp)) continue;
+
+      const eventStart = Math.max(
+        rangeStart,
+        Number.isFinite(proposedStart) ? proposedStart : timestamp - 5
+      );
+
+      const eventEnd = Math.min(
+        rangeEnd,
+        Number.isFinite(proposedEnd) ? proposedEnd : timestamp + 5
+      );
+
+      if (
+        timestamp < rangeStart ||
+        timestamp > rangeEnd ||
+        eventEnd <= eventStart
+      ) continue;
+
+      candidates.push({
+        timestamp,
+        start: eventStart,
+        end: eventEnd,
+        time: safeTimestamp(eventStart),
+        endTime: safeTimestamp(eventEnd),
+        title: String(item.title || "Observed event"),
+        description: String(item.description || ""),
+        evidence: String(item.evidence || ""),
+        hook: "",
+        reason: String(item.reason || ""),
+        importanceScore: Math.max(
+          0,
+          Math.min(100, Number(item.importanceScore) || 0)
+        ),
+        confidence: Math.max(
+          0,
+          Math.min(1, Number(item.confidence) || 0)
+        ),
+        mode: "visual-ai"
+      });
+    }
+  }
+
+  // Remove events that substantially overlap.
+  candidates.sort((a, b) => b.importanceScore - a.importanceScore);
+
+  const selected = [];
+
+  for (const candidate of candidates) {
+    const overlaps = selected.some(existing =>
+      Math.max(candidate.start, existing.start) <
+      Math.min(candidate.end, existing.end)
+    );
+
+    if (!overlaps) selected.push(candidate);
+  }
+
+  return selected.sort((a, b) => a.start - b.start);
+}
+
 
 function createSrt(segments, clipStart, clipEnd) {
   const relevant = segments.filter(s =>
@@ -636,42 +827,109 @@ async function createClip(videoPath, event, job, videoIndex) {
   };
 }
 
+
 async function processVideo(job, video, videoIndex, totalVideos) {
   const duration = await getVideoInfo(video.path);
+
   const start = parseTimestamp(job.settings.startTime || "00:00:00");
+
   const end = job.settings.endTime
     ? parseTimestamp(job.settings.endTime)
     : duration;
 
   if (start >= end || end > duration) {
-    throw new Error(`Invalid time range. Video duration: ${safeTimestamp(duration)}`);
+    throw new Error(
+      `Invalid time range. Video duration: ${safeTimestamp(duration)}`
+    );
   }
 
-  job.stage = `Transcribing video ${videoIndex + 1} of ${totalVideos}`;
-  const transcript = await transcribeVideo(video.path, end - start, job);
+  // Step 1: Transcribe audio.
+  // A video with no speech can still be analyzed visually.
+  let adjustedTranscript = [];
 
-  // If the user selected a starting offset, adjust transcript timestamps.
-  const adjustedTranscript = transcript.map(s => ({
-    ...s,
-    start: s.start + start,
-    end: s.end + start
-  }));
+  try {
+    job.stage = `Transcribing audio (${videoIndex + 1}/${totalVideos})`;
 
-  job.stage = "Understanding the video's context";
-  job.progress = 38;
+    const transcript = await transcribeVideo(
+      video.path,
+      end - start,
+      job
+    );
 
-  const events = await findHighlights(
-    adjustedTranscript,
+    adjustedTranscript = transcript.map(segment => ({
+      ...segment,
+      start: segment.start + start,
+      end: segment.end + start
+    }));
+  } catch (error) {
+    console.error("Audio transcription unavailable:", error.message);
+    job.stage = "Continuing with visual analysis";
+  }
+
+  // Step 2: Extract actual video frames.
+  const frames = await extractVideoFrames(
+    video.path,
+    start,
+    end,
+    job,
+    videoIndex
+  );
+
+  if (!frames.length) {
+    throw new Error("Could not extract frames from this video.");
+  }
+
+  // Step 3: Analyze the frames using AI vision.
+  const visualEvents = await analyzeVisualFrames(
+    frames,
     job.settings.question,
+    start,
+    end,
     job
   );
 
-  const finalEvents = events.map(event => ({
-    ...event,
-    videoName: video.name,
-    rangeStart: start,
-    rangeEnd: end
-  }));
+  // Step 4: Analyze speech separately when available.
+  let transcriptEvents = [];
+
+  if (adjustedTranscript.length) {
+    transcriptEvents = await findHighlights(
+      adjustedTranscript,
+      job.settings.question,
+      job
+    );
+  }
+
+  // Step 5: Combine visual and audio findings.
+  const combined = [
+    ...visualEvents,
+    ...transcriptEvents
+  ];
+
+  combined.sort((a, b) =>
+    b.importanceScore - a.importanceScore
+  );
+
+  const finalEvents = [];
+
+  for (const event of combined) {
+    const overlaps = finalEvents.some(existing =>
+      Math.max(event.start, existing.start) <
+      Math.min(event.end, existing.end) * 0.85
+    );
+
+    if (!overlaps) {
+      finalEvents.push({
+        ...event,
+        videoName: video.name,
+        rangeStart: start,
+        rangeEnd: end
+      });
+    }
+
+    if (finalEvents.length >= MAX_HIGHLIGHTS) break;
+  }
+
+  finalEvents.sort((a, b) => a.start - b.start);
 
   return {
     videoName: video.name,
@@ -680,9 +938,16 @@ async function processVideo(job, video, videoIndex, totalVideos) {
     end,
     transcript: adjustedTranscript,
     transcriptText: transcriptToText(adjustedTranscript),
-    events: finalEvents
+    events: finalEvents,
+    analysis: {
+      visualFramesAnalyzed: frames.length,
+      visualEventsFound: visualEvents.length,
+      transcriptEventsFound: transcriptEvents.length,
+      visualAnalysisAvailable: true
+    }
   };
 }
+
 
 async function processJob(job) {
   try {
@@ -714,6 +979,8 @@ async function processJob(job) {
 app.get("/api/health", (req, res) => {
   res.json({
     status: "ok",
+    visualAnalysisAvailable: Boolean(openai),
+    visualAnalysisModel: MODEL,
     openAIConfigured: Boolean(openai),
     transcriptionAvailable: Boolean(openai),
     transcriptHighlightDetection: Boolean(openai),
